@@ -1,0 +1,51 @@
+name: Build
+
+on:
+  push:
+    paths-ignore:
+      - "**/*.md"
+      - "**/*.txt"
+  pull_request:
+    paths-ignore:
+      - "**/*.md"
+      - "**/*.txt"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout payload SDK
+        uses: actions/checkout@v4
+        with:
+          repository: ps-payload-dev/sdk
+          path: sdk
+
+      - name: Set up both SDKs
+        working-directory: sdk
+        run: |
+          sudo apt update
+          sudo apt install clang-18 lld-18
+          make DESTDIR=${{ runner.tool_cache }}/ps-payload-sdk clean install
+          echo PS4_PAYLOAD_SDK=${{ runner.tool_cache }}/ps-payload-sdk/ps4 >> $GITHUB_ENV
+          echo PS5_PAYLOAD_SDK=${{ runner.tool_cache }}/ps-payload-sdk/ps5 >> $GITHUB_ENV
+
+      - name: Checkout lib-ptrace
+        uses: actions/checkout@v4
+
+      - name: Build PS4 and PS5 libraries
+        run: make all
+
+      - name: Upload PS4 library
+        uses: actions/upload-artifact@v4
+        with:
+          name: libptrace-ps4
+          path: build/ps4/libptrace.a
+          if-no-files-found: error
+
+      - name: Upload PS5 library
+        uses: actions/upload-artifact@v4
+        with:
+          name: libptrace-ps5
+          path: build/ps5/libptrace.a
+          if-no-files-found: error

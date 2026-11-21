@@ -5,22 +5,22 @@ payloads. It provides process control, memory access, remote syscalls and
 function calls, and symbol lookup through one shared API.
 
 It is based on the `pt_*` helpers of [John Törnblom](https://github.com/john-tornblom)'s
-[PS4][ps4-upstream] and [PS5][ps5-upstream] elfldr projects, and builds with the
-unified [payload SDK][sdk]. The Makefile creates one archive per console:
+[PS4 elfldr project][ps4-upstream] and [PS5 elfldr project][ps5-upstream], and
+builds with the unified [payload SDK][sdk]. The Makefile creates one archive per console:
 
 | Console | Archive |
 | --- | --- |
 | PS4 | `build/ps4/libptrace.a` |
 | PS5 | `build/ps5/libptrace.a` |
 
-## Build
+## Building
 
 Install the [payload SDK][sdk] for the console you want to build on a
 Debian-based POSIX system. Set the matching SDK path, replacing `#` with `4` or
 `5`:
 
 ```console
-export PS#_PAYLOAD_SDK=/opt/ps-payload-dev-sdk/ps#
+export PS#_PAYLOAD_SDK=/opt/ps-payload-sdk/ps#
 ```
 
 Build one console:
@@ -103,6 +103,7 @@ differences internally.
 | `pt_resolve` | Find an exported libkernel function by name or NID; returns `0` if not found |
 | `pt_call` | Call a function on the stopped thread with up to six integer arguments and read `rax` |
 | `pt_pipe`, `pt_errno`, `pt_sceKernelGetProcParam` | Helpers that call into the target's libkernel |
+| `patch_ps4_ptrace` | PS4 only: patch the kernel's ptrace checks (firmware 3.50 to 14.02) so payloads can attach to other processes |
 
 Example: resolve `getpid` and call it in the target process:
 
@@ -119,7 +120,9 @@ if (function && !pt_call(pid, function, args, &result))
 
 - Payloads on both consoles need permission to use `ptrace`. On PS5, the
   library temporarily raises and restores the caller's authority ID; a lock
-  serializes requests across threads.
+  serializes requests across threads. On PS4, call `patch_ps4_ptrace()` once
+  before attaching; it fails with `ENOSYS` on unsupported firmware, is safe to
+  call repeatedly, and recognizes sites that are already patched.
 - `pt_call` restores the thread's registers and waits about ten seconds. On
   PS4, it maps a scratch region for the call; a timed-out call may leave that
   region allocated because the function could still be using it.
@@ -140,10 +143,12 @@ his copyright notice remains in the source files. The PS4 backend also uses
 the FPU register layout from ps4debug-NG and a remote-call return-address check
 from NexusFramework.
 
-## Contributing
+## Reporting Bugs
 
-[Report a bug or propose a change][issues]. For larger changes, open an issue
-before starting work so the approach can be discussed.
+If you encounter problems with lib-ptrace, please [file a github issue][issues].
+If you plan on sending pull requests which affect more than a few lines of
+code, please file an issue before you start to work on your changes. This will
+allow us to discuss the solution properly before you commit time and effort.
 
 ## License
 

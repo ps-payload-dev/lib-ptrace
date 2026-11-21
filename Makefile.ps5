@@ -1,0 +1,12 @@
+PLATFORM := ps5
+NAME := ptrace
+VERSION := 1.0.0
+LIB := lib$(NAME).a
+ARCH :=
+
+ifndef PS5_PAYLOAD_SDK
+$(error PS5_PAYLOAD_SDK is undefined)
+endif
+include $(PS5_PAYLOAD_SDK)/toolchain/prospero.mk
+
+include Makefile.build

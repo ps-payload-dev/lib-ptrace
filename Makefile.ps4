@@ -1,0 +1,12 @@
+PLATFORM := ps4
+NAME := ptrace
+VERSION := 1.0.0
+LIB := lib$(NAME).a
+ARCH := -mstackrealign
+
+ifndef PS4_PAYLOAD_SDK
+$(error PS4_PAYLOAD_SDK is undefined)
+endif
+include $(PS4_PAYLOAD_SDK)/toolchain/orbis.mk
+
+include Makefile.build

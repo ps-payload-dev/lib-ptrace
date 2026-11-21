@@ -1,0 +1,37 @@
+.DEFAULT_GOAL := all
+
+SOURCES := source/ptrace.c
+BUILD_DIR ?= build/$(PLATFORM)
+OBJ_DIR := $(BUILD_DIR)/objects
+OBJECTS := $(SOURCES:source/%.c=$(OBJ_DIR)/%.o)
+OPT ?= -O2
+
+CFLAGS := -std=gnu11 $(OPT) $(ARCH) -fPIC -ffunction-sections -fdata-sections
+CFLAGS += -Wall -Wextra -Werror -Iheaders -MMD -MP $(if $(DEBUG),-g)
+
+.PHONY: all install clean format
+
+all: $(BUILD_DIR)/$(LIB)
+
+$(BUILD_DIR)/$(LIB): $(OBJECTS)
+	@mkdir -p $(dir $@)
+	rm -f $@
+	$(AR) rcs $@ $^
+
+$(OBJ_DIR)/%.o: source/%.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+install: $(BUILD_DIR)/$(LIB)
+	install -d $(DESTDIR)$(PREFIX)/include $(DESTDIR)$(PREFIX)/lib/pkgconfig
+	install -m 644 headers/ptrace.h $(DESTDIR)$(PREFIX)/include/ptrace.h
+	install -m 644 $< $(DESTDIR)$(PREFIX)/lib/$(LIB)
+	sed -e 's|@PREFIX@|$(PREFIX)|' -e 's|@VERSION@|$(VERSION)|' $(NAME).pc.in > $(DESTDIR)$(PREFIX)/lib/pkgconfig/$(NAME).pc
+
+clean:
+	rm -rf $(BUILD_DIR)
+
+format:
+	clang-format -i $(wildcard source/*.c headers/*.h)
+
+-include $(OBJECTS:.o=.d)

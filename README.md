@@ -4,8 +4,9 @@
 payloads. It provides process control, memory access, remote syscalls and
 function calls, and symbol lookup through one shared API.
 
-It builds with the [payload SDK][sdk]. The Makefile creates one archive per
-console:
+It is based on the `pt_*` helpers of [John Törnblom](https://github.com/john-tornblom)'s
+[PS4][ps4-upstream] and [PS5][ps5-upstream] elfldr projects, and builds with the
+unified [payload SDK][sdk]. The Makefile creates one archive per console:
 
 | Console | Archive |
 | --- | --- |
@@ -22,31 +23,29 @@ Debian-based POSIX system. Set the matching SDK path, replacing `#` with `4` or
 export PS#_PAYLOAD_SDK=/opt/ps-payload-dev-sdk/ps#
 ```
 
-Build one console or every console with an SDK variable set:
+Build one console:
 
 ```console
-make ps4
-make ps5
-make all
+make PLATFORM=ps4
+make PLATFORM=ps5
 ```
 
-`make` also builds all consoles with their SDK variables set. Objects and
-archives go under `build/<console>`. Use `make clean` to remove the build
-directories. Set `OPT` to change optimization flags (for example, `OPT=-Oz`)
-or set `DEBUG=1` to include debug symbols.
+Objects go under `build/<console>/objects`, and archives go under
+`build/<console>`. Use `make PLATFORM=<console> clean` to remove the build
+directory and `make PLATFORM=<console> format` to format the sources. Set `OPT` to change optimization
+flags (for example, `OPT=-Oz`) or set `DEBUG=1` to include debug symbols.
 
 The GitHub Actions workflow builds both consoles using the [payload SDK][sdk]
 and uploads separate `libptrace-ps4` and `libptrace-ps5` artifacts.
 
 ## Install
 
-`make install` installs the library for each configured SDK. To install only one
-console, use `make install-ps4` or `make install-ps5`. The default destination
-follows the SDK toolchain. Set `DESTDIR` to stage files elsewhere or `PREFIX`
+`make PLATFORM=<console> install` installs the library for that console. The
+default destination follows the SDK toolchain. Set `DESTDIR` to stage files elsewhere or `PREFIX`
 to change the install prefix:
 
 ```console
-make install-ps5 DESTDIR=/path/to/stage
+make PLATFORM=ps5 install DESTDIR=/path/to/stage
 ```
 
 The install includes `ptrace.h`, `libptrace.a`, and `ptrace.pc`. Use the SDK's
@@ -61,7 +60,7 @@ To install next to the SDK's own headers and libraries instead, use an empty
 prefix and link with `-lptrace -lkernel_sys`:
 
 ```console
-make install PREFIX=
+make PLATFORM=ps5 install PREFIX=
 ```
 
 ## Use
@@ -141,8 +140,16 @@ his copyright notice remains in the source files. The PS4 backend also uses
 the FPU register layout from ps4debug-NG and a remote-call return-address check
 from NexusFramework.
 
+## Contributing
+
+[Report a bug or propose a change][issues]. For larger changes, open an issue
+before starting work so the approach can be discussed.
+
 ## License
 
 GPL-3.0-or-later. See [LICENSE](LICENSE).
 
 [sdk]: https://github.com/ps-payload-dev/sdk
+[ps4-upstream]: https://github.com/ps4-payload-dev/elfldr
+[ps5-upstream]: https://github.com/ps5-payload-dev/elfldr
+[issues]: https://github.com/ps-payload-dev/lib-ptrace/issues/new

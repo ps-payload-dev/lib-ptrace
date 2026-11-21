@@ -7,3 +7,4 @@ AllowShortIfStatementsOnASingleLine: false
 IndentCaseLabels: true
 SpaceBeforeParens: Never
 SpacesInContainerLiterals: false
+SortIncludes: Never

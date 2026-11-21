@@ -1,1 +1,7 @@
+*~
+*.o
+*.a
 build/
+deps/
+*.elf
+*.bin

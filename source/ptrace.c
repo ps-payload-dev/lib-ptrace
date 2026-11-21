@@ -28,6 +28,8 @@ along with this program; see the file COPYING. If not, see
 
 #ifdef __ORBIS__
 #include <ps4/kernel.h>
+#include <pthread.h>
+#include <ps4/mdbg.h>
 #endif
 
 #ifdef __PROSPERO__
@@ -49,32 +51,341 @@ along with this program; see the file COPYING. If not, see
 
 static int ps4_ptrace_is_patched = 0;
 
-int
-patch_ps4_ptrace(void) {
-  unsigned int fw = kernel_get_fw_version();
-  unsigned long pt_patch = 0;
-  unsigned short pt_patch_size = 6;
-  static const unsigned char nops[6] = {
-    0x90, 0x90, 0x90, 0x90, 0x90, 0x90
-  };
+static int
+patch_ps4_site(unsigned long addr, const unsigned char *before,
+               const unsigned char *after, size_t len, const char *name) {
+  unsigned char current[8];
 
-  if(ps4_ptrace_is_patched) {
+  if(!addr || !before || !after || !len || len > sizeof(current)) {
+    errno = EINVAL;
+    return -1;
+  }
+  if(kernel_copyout(addr, current, len)) {
+    LOG_EPRINTF("Cannot read kernel patch site %s at 0x%lx\n", name, addr);
+    errno = EIO;
+    return -1;
+  }
+  if(!memcmp(current, after, len)) {
+    return 0;
+  }
+  if(memcmp(current, before, len)) {
+    LOG_EPRINTF("Unexpected bytes at kernel patch site %s 0x%lx\n", name,
+                addr);
+    errno = EINVAL;
+    return -1;
+  }
+  if(kernel_patch(addr, before, after, len)) {
+    LOG_PERROR("kernel_patch");
+    return -1;
+  }
+  if(kernel_copyout(addr, current, len) || memcmp(current, after, len)) {
+    LOG_EPRINTF("Kernel patch verification failed at %s 0x%lx\n", name, addr);
+    errno = EIO;
+    return -1;
+  }
+  return 0;
+}
+
+/*
+ * Reject ambiguous scans so a changed kernel layout cannot patch the wrong
+ * site.
+ */
+static unsigned long
+find_unique_ps4_pattern(const char *pattern) {
+  const unsigned long base = KERNEL_ADDRESS_IMAGE_BASE;
+  unsigned long match = kernel_find_pattern(base, KERNEL_IMAGE_SIZE, pattern);
+
+  if(!match) {
+    errno = ENOENT;
+    return 0;
+  }
+  if(match <= base || match - base >= KERNEL_IMAGE_SIZE) {
+    errno = EFAULT;
+    return 0;
+  }
+  const size_t remaining = KERNEL_IMAGE_SIZE - (match + 1 - base);
+  if(remaining && kernel_find_pattern(match + 1, remaining, pattern)) {
+    errno = EEXIST;
+    return 0;
+  }
+  return match;
+}
+
+static int
+patch_ps4_aob_site(const char *before_pattern, const char *after_pattern,
+                   size_t site_offset, const unsigned char *before,
+                   const unsigned char *after, size_t length,
+                   const char *name) {
+  errno = 0;
+  unsigned long match = find_unique_ps4_pattern(before_pattern);
+  if(!match && errno == EEXIST) {
+    LOG_EPRINTF("Ambiguous AOB for kernel patch site %s\n", name);
+    return -1;
+  }
+  if(!match) {
+    errno = 0;
+    match = find_unique_ps4_pattern(after_pattern);
+    if(!match && errno == EEXIST) {
+      LOG_EPRINTF("Ambiguous patched AOB for kernel patch site %s\n", name);
+      return -1;
+    }
+    if(match) {
+      return patch_ps4_site(match + site_offset, after, after, length, name);
+    }
+  }
+  if(!match) {
+    return 1;
+  }
+  return patch_ps4_site(match + site_offset, before, after, length, name);
+}
+
+static const unsigned char *
+ps4_acmgr_call_bytes(unsigned int fw) {
+  switch(fw & 0xffff0000) {
+    case 0x4500000:
+    case 0x4550000:
+      return (const unsigned char *)"\x77\x39\x13\x00";
+    case 0x4700000:
+      return (const unsigned char *)"\x37\x69\x13\x00";
+    case 0x4710000:
+    case 0x4720000:
+    case 0x4730000:
+    case 0x4740000:
+      return (const unsigned char *)"\xc7\x68\x13\x00";
+    case 0x5000000:
+      return (const unsigned char *)"\xe7\xe7\x1b\x00";
+    case 0x5010000:
+      return (const unsigned char *)"\xe7\xe7\x1b\x00";
+    case 0x5030000:
+      return (const unsigned char *)"\xf7\xe8\x1b\x00";
+    case 0x5050000:
+      return (const unsigned char *)"\xf7\xe8\x1b\x00";
+    case 0x5070000:
+      return (const unsigned char *)"\xf7\xe8\x1b\x00";
+    case 0x5500000:
+      return (const unsigned char *)"\x77\xe8\xfd\xff";
+    case 0x5530000:
+      return (const unsigned char *)"\x97\xe8\xfd\xff";
+    case 0x5550000:
+      return (const unsigned char *)"\x97\xe8\xfd\xff";
+    case 0x5560000:
+    case 0x6000000:
+    case 0x6020000:
+    case 0x6200000:
+      return (const unsigned char *)"\xf7\x04\x0e\x00";
+    case 0x6500000:
+    case 0x6510000:
+    case 0x6700000:
+    case 0x6710000:
+    case 0x6720000:
+      return (const unsigned char *)"\x07\xc4\x09\x00";
+    case 0x7000000:
+    case 0x7010000:
+    case 0x7020000:
+      return (const unsigned char *)"\x97\x47\x0a\x00";
+    case 0x7500000:
+    case 0x7510000:
+    case 0x7550000:
+      return (const unsigned char *)"\x67\xd1\xd7\xff";
+    case 0x8000000:
+    case 0x8010000:
+    case 0x8020000:
+    case 0x8030000:
+      return (const unsigned char *)"\x77\x40\xfb\xff";
+    case 0x8500000:
+    case 0x8520000:
+      return (const unsigned char *)"\x27\x18\xeb\xff";
+    case 0x9000000:
+      return (const unsigned char *)"\x07\xc1\x28\x00";
+    case 0x9030000:
+    case 0x9040000:
+      return (const unsigned char *)"\xa7\xbd\x28\x00";
+    case 0x9500000:
+    case 0x9510000:
+    case 0x9600000:
+      return (const unsigned char *)"\xa7\x45\x29\x00";
+    case 0x10000000:
+    case 0x10010000:
+      return (const unsigned char *)"\xc7\xcc\x01\x00";
+    case 0x10500000:
+    case 0x10700000:
+    case 0x10710000:
+      return (const unsigned char *)"\x17\xa4\x01\x00";
+    case 0x11000000:
+    case 0x11020000:
+      return (const unsigned char *)"\xb7\x96\xff\xff";
+    case 0x11500000:
+    case 0x11520000:
+    case 0x12000000:
+    case 0x12020000:
+    case 0x12500000:
+    case 0x12520000:
+    case 0x13000000:
+    case 0x13020000:
+    case 0x13040000:
+    case 0x13500000:
+    case 0x13520000:
+    case 0x14000000:
+      return (const unsigned char *)"\x57\xc9\x06\x00";
+    case 0x14020000:
+      return (const unsigned char *)"\xc7\xc9\x06\x00";
+    default:
+      return 0;
+  }
+}
+
+static int
+patch_ps4_acmgr_debug_gate(unsigned int fw) {
+  static const unsigned char before_prefix[5]
+      = { 0x55, 0x48, 0x89, 0xe5, 0xe8 };
+  static const unsigned char after[8]
+      = { 0x48, 0xc7, 0xc0, 0x01, 0x00, 0x00, 0x00, 0xc3 };
+  char before_pattern[] = "554889e5e8????????31c983f8010f94c189c85dc3";
+  const unsigned char *call_bytes = ps4_acmgr_call_bytes(fw);
+  static const char after_pattern[]
+      = "48c7c001000000c3??31c983f8010f94c189c85dc3";
+  static const char legacy_pattern[]
+      = "b001c3????????????31c983f8010f94c189c85dc3";
+  unsigned long match;
+  unsigned char original[sizeof(after)];
+
+  if((fw & 0xffff0000) < 0x04500000) {
     return 0;
   }
 
+  if(call_bytes) {
+    snprintf(before_pattern, sizeof(before_pattern),
+             "554889e5e8%02x%02x%02x%02x31c983f8010f94c189c85dc3",
+             call_bytes[0], call_bytes[1], call_bytes[2], call_bytes[3]);
+  }
+
+  errno = 0;
+  match = find_unique_ps4_pattern(before_pattern);
+  if(!match && errno == EEXIST) {
+    LOG_EPUTS("Ambiguous AOB for ACMGR debug gate");
+    return -1;
+  }
+  if(!match) {
+    errno = 0;
+    match = find_unique_ps4_pattern(after_pattern);
+    if(!match && errno == EEXIST) {
+      LOG_EPUTS("Ambiguous patched AOB for ACMGR debug gate");
+      return -1;
+    }
+    if(match) {
+      return patch_ps4_site(match, after, after, sizeof(after),
+                            "acmgr-system-debug");
+    }
+  }
+  if(!match) {
+    errno = 0;
+    match = find_unique_ps4_pattern(legacy_pattern);
+    if(!match && errno == EEXIST) {
+      LOG_EPUTS("Ambiguous legacy AOB for ACMGR debug gate");
+      return -1;
+    }
+    if(match) {
+      return 0;
+    }
+  }
+  if(!match) {
+    LOG_EPRINTF("ACMGR debug gate AOB not found for firmware 0x%x\n", fw);
+    errno = ENOENT;
+    return -1;
+  }
+  if(kernel_copyout(match, original, sizeof(original))) {
+    LOG_PERROR("read ACMGR debug gate");
+    return -1;
+  }
+  if(memcmp(original, before_prefix, sizeof(before_prefix))) {
+    errno = EINVAL;
+    return -1;
+  }
+  return patch_ps4_site(match, original, after, sizeof(after),
+                        "acmgr-system-debug");
+}
+
+static int
+patch_ps4_ptrace_allow_gate(unsigned int fw) {
+  static const unsigned char before[2] = { 0x77, 0x1c };
+  static const unsigned char after[2] = { 0xeb, 0x1c };
+  int result
+      = patch_ps4_aob_site("ffff4189c483f82a????48b8361000007e0200004c0fa3e0",
+                           "ffff4189c483f82aeb1c48b8361000007e0200004c0fa3e0",
+                           8, before, after, sizeof(before), "ptrace-allow");
+
+  if(result > 0 && (fw & 0xffff0000) >= 0x07000000) {
+    LOG_EPRINTF("Ptrace-allow AOB missing on firmware 0x%x\n", fw);
+    errno = ENOENT;
+    return -1;
+  }
+  return result < 0 ? -1 : 0;
+}
+
+static int
+patch_ps4_ptrace_policy_gate(unsigned int fw) {
+  static const unsigned char before[5] = { 0x48, 0x8b, 0x41, 0x08, 0x44 };
+  static const unsigned char after[5] = { 0xe9, 0x7c, 0x02, 0x00, 0x00 };
+  int result = patch_ps4_aob_site("488b41084489c3488b7840e8",
+                                  "e97c02000089c3488b7840e8", 0, before, after,
+                                  sizeof(before), "ptrace-policy");
+
+  if(result > 0 && (fw & 0xffff0000) >= 0x07000000) {
+    LOG_EPRINTF("Ptrace-policy AOB missing on firmware 0x%x\n", fw);
+    errno = ENOENT;
+    return -1;
+  }
+  return result < 0 ? -1 : 0;
+}
+
+static int
+patch_ps4_nop_site(const char *head, const char *site_before,
+                   const char *site_after, const char *tail, size_t length,
+                   const char *name) {
+  static const unsigned char nops[8]
+      = { 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90 };
+  const size_t offset = strlen(head) / 2;
+  unsigned char current[8];
+  char pattern[256];
+  unsigned long match;
+
+  if(length > sizeof(current)) {
+    errno = EINVAL;
+    return -1;
+  }
+
+  snprintf(pattern, sizeof(pattern), "%s%s%s", head, site_before, tail);
+  match = kernel_find_pattern(KERNEL_ADDRESS_IMAGE_BASE, KERNEL_IMAGE_SIZE,
+                              pattern);
+  if(!match) {
+    snprintf(pattern, sizeof(pattern), "%s%s%s", head, site_after, tail);
+    if(kernel_find_pattern(KERNEL_ADDRESS_IMAGE_BASE, KERNEL_IMAGE_SIZE,
+                           pattern)) {
+      return 0;
+    }
+    LOG_EPRINTF("Ptrace AOB %s not found\n", name);
+    errno = ENOENT;
+    return -1;
+  }
+  if(kernel_copyout(match + offset, current, length)) {
+    LOG_PERROR("kernel_copyout");
+    errno = EIO;
+    return -1;
+  }
+  return patch_ps4_site(match + offset, current, nops, length, name);
+}
+
+static int
+patch_ps4_ptrace_core(unsigned int fw) {
   switch(fw & 0xffff0000) {
     case 0x3500000:
     case 0x3550000:
     case 0x3700000:
-      if((pt_patch = kernel_find_pattern(
-              KERNEL_ADDRESS_IMAGE_BASE, KERNEL_IMAGE_SIZE,
-              "48b8810ef000000400004c0fa3c07326"
-              "????????????????????????????????????????????????????????????????"
-              "41bf0100000085db7469"))) {
-        pt_patch += 56;
-        pt_patch_size = 2;
-      }
-      break;
+      return patch_ps4_nop_site(
+          "48b8810ef000000400004c0fa3c07326"
+          "????????????????????????????????????????????????????????????????"
+          "41bf0100000085db",
+          "7469", "9090", "", 2, "ptrace-core");
     case 0x4000000:
     case 0x4010000:
     case 0x4050000:
@@ -87,13 +398,11 @@ patch_ps4_ptrace(void) {
     case 0x4720000:
     case 0x4730000:
     case 0x4740000:
-      if((pt_patch = kernel_find_pattern(
-              KERNEL_ADDRESS_IMAGE_BASE, KERNEL_IMAGE_SIZE,
-              "48b8361000007e020000???????????????????????????????????????????"
-              "???????????????????????0f84????????"))) {
-        pt_patch += 43;
-      }
-      break;
+      return patch_ps4_nop_site("48b8361000007e020000"
+                                "???????????????????????????????????????????"
+                                "???????????????????????",
+                                "0f84????????", "909090909090", "", 6,
+                                "ptrace-core");
     case 0x5000000:
     case 0x5010000:
     case 0x5030000:
@@ -111,13 +420,10 @@ patch_ps4_ptrace(void) {
     case 0x6700000:
     case 0x6710000:
     case 0x6720000:
-      if((pt_patch = kernel_find_pattern(
-              KERNEL_ADDRESS_IMAGE_BASE, KERNEL_IMAGE_SIZE,
-              "48b8361000007e020000??????????????????????????"
-              "0f84????????"))) {
-        pt_patch += 23;
-      }
-      break;
+      return patch_ps4_nop_site("48b8361000007e020000"
+                                "??????????????????????????",
+                                "0f84????????", "909090909090", "", 6,
+                                "ptrace-core");
     case 0x7000000:
     case 0x7010000:
     case 0x7020000:
@@ -156,35 +462,65 @@ patch_ps4_ptrace(void) {
     case 0x13520000:
     case 0x14000000:
     case 0x14020000:
-      if((pt_patch = kernel_find_pattern(
-              KERNEL_ADDRESS_IMAGE_BASE, KERNEL_IMAGE_SIZE,
-              "48b8361000007e020000????????????????????????"
-              "0f84190200004c8b"))) {
-        pt_patch += 22;
-      }
-      break;
-
+      return patch_ps4_nop_site("48b8361000007e020000"
+                                "????????????????????????",
+                                "0f8419020000", "909090909090", "4c8b", 6,
+                                "ptrace-core");
     default:
-      LOG_PRINTF("Unsupported firmware (0x%x)\n", fw);
+      LOG_EPRINTF("Unsupported firmware (0x%x)\n", fw);
       errno = ENOSYS;
       return -1;
   }
+}
 
-  if(pt_patch) {
-    LOG_PRINTF("Patching kernel at 0x%lx (ptrace)\n", pt_patch);
-    if(kernel_patch(pt_patch, 0, nops, pt_patch_size)) {
-      LOG_PERROR("kernel_patch (ptrace)");
-      return -1;
-    }
+int
+patch_ps4_ptrace(void) {
+  const unsigned int fw = kernel_get_fw_version();
+
+  if(ps4_ptrace_is_patched) {
+    return 0;
   }
 
+  if(patch_ps4_ptrace_core(fw) || patch_ps4_acmgr_debug_gate(fw)
+     || patch_ps4_ptrace_allow_gate(fw) || patch_ps4_ptrace_policy_gate(fw)) {
+    return -1;
+  }
+
+  LOG_PUTS("Kernel ptrace patched");
   ps4_ptrace_is_patched = 1;
   return 0;
 }
 
 static int
 sys_ptrace(int request, pid_t pid, caddr_t addr, int data) {
-  return ptrace(request, pid, addr, data);
+  static pthread_mutex_t sys_ptrace_lock = PTHREAD_MUTEX_INITIALIZER;
+  const pid_t mypid = getpid();
+  unsigned long authid;
+  int ret = -1;
+  int error = 0;
+
+  pthread_mutex_lock(&sys_ptrace_lock);
+
+  if((authid = kernel_get_ucred_authid(mypid))
+     && !kernel_set_ucred_authid(mypid, 0x3800000000010003l)) {
+    ret = ptrace(request, pid, addr, data);
+    error = errno;
+
+    if(kernel_set_ucred_authid(mypid, authid)) {
+      ret = -1;
+      error = errno;
+    }
+  } else {
+    error = errno;
+    if(!error) {
+      error = EPERM;
+    }
+  }
+
+  errno = error;
+  pthread_mutex_unlock(&sys_ptrace_lock);
+
+  return ret;
 }
 
 #endif
@@ -201,22 +537,27 @@ sys_ptrace(int request, pid_t pid, caddr_t addr, int data) {
   pid_t mypid = getpid();
   uint64_t authid;
   int ret = -1;
+  int error = 0;
 
   pthread_mutex_lock(&sys_ptrace_lock);
 
   if((authid = kernel_get_ucred_authid(mypid))
      && !kernel_set_ucred_authid(mypid, 0x4800000000010003l)) {
     ret = (int)syscall(SYS_ptrace, request, pid, addr, data);
-
-    int error = errno;
+    error = errno;
 
     if(kernel_set_ucred_authid(mypid, authid)) {
       ret = -1;
-    } else {
-      errno = error;
+      error = errno;
+    }
+  } else {
+    error = errno;
+    if(!error) {
+      error = EPERM;
     }
   }
 
+  errno = error;
   pthread_mutex_unlock(&sys_ptrace_lock);
 
   return ret;
@@ -282,8 +623,8 @@ pt_attach(pid_t pid) {
 
   int detached = pt_detach(pid, 0);
 
-  LOG_PRINTF("[Ptrace] Attach timeout: pid=%d detach=%d errno=%d\n", pid,
-             detached, detached ? errno : 0);
+  LOG_EPRINTF("Attach timeout: pid=%d detach=%d errno=%d\n", pid, detached,
+              detached ? errno : 0);
   errno = ETIMEDOUT;
 
   return -1;
@@ -367,8 +708,8 @@ pt_breakat(pid_t pid, intptr_t brkpoint) {
   stopped = pt_wait_stopped(pid, 30000);
 
   if(stopped == 0) {
-    LOG_PUTS("[Ptrace] Breakpoint not reached; requesting stop before "
-             "removing it");
+    LOG_EPUTS("Breakpoint not reached; requesting stop before "
+              "removing it");
     kill(pid, SIGSTOP);
 
     if(!pt_wait_stopped(pid, 2000)) {
@@ -406,6 +747,16 @@ pt_setregs(pid_t pid, const struct reg *r) {
 
 static int
 pt_io(pid_t pid, int op, intptr_t addr, void *buf, size_t len) {
+#ifdef __ORBIS__
+  if(op == PIOD_READ_D) {
+    return mdbg_copyout(pid, addr, buf, len);
+  }
+  if(op == PIOD_WRITE_D) {
+    return mdbg_copyin(pid, buf, addr, len);
+  }
+  errno = EINVAL;
+  return -1;
+#else
   struct ptrace_io_desc iod = {
     .piod_op = op, .piod_offs = (void *)addr, .piod_addr = buf, .piod_len = len
   };
@@ -419,6 +770,7 @@ pt_io(pid_t pid, int op, intptr_t addr, void *buf, size_t len) {
   }
 
   return 0;
+#endif
 }
 
 int
@@ -698,18 +1050,30 @@ pt_syscall_address(pid_t pid, unsigned number) {
 
 long
 pt_syscall(pid_t pid, int sysno, ...) {
+#ifdef __ORBIS__
+  const pid_t tid = pid;
+#else
   struct ptrace_lwpinfo origin = { 0 };
+  pid_t tid;
+#endif
   struct reg sysc_reg;
   struct reg bak_reg;
   va_list ap;
 
+#ifndef __ORBIS__
   if(sys_ptrace(PT_LWPINFO, pid, (caddr_t)&origin, sizeof(origin))
      || origin.pl_lwpid <= 0) {
     return -1;
   }
+  tid = origin.pl_lwpid;
+#endif
 
-  pid_t tid = origin.pl_lwpid;
   intptr_t syscall_ip = pt_syscall_address(pid, sysno);
+#ifdef __ORBIS__
+  if(!syscall_ip && pid != getpid()) {
+    syscall_ip = pt_syscall_address(getpid(), sysno);
+  }
+#endif
 
   if(!syscall_ip) {
     LOG_PERROR("resolve syscall stub");
@@ -753,12 +1117,19 @@ pt_syscall(pid_t pid, int sysno, ...) {
       break;
     }
 
+#ifdef __ORBIS__
+    const int event_lwpid = (int)tid;
+    if(pt_getregs(tid, &sysc_reg)) {
+      break;
+    }
+#else
     struct ptrace_lwpinfo event = { 0 };
-
     if(sys_ptrace(PT_LWPINFO, pid, (caddr_t)&event, sizeof(event))
        || pt_getregs(tid, &sysc_reg)) {
       break;
     }
+    const int event_lwpid = (int)event.pl_lwpid;
+#endif
 
     int sig = WSTOPSIG(status);
 
@@ -768,11 +1139,11 @@ pt_syscall(pid_t pid, int sysno, ...) {
       break;
     }
 
-    LOG_PRINTF("[Ptrace] syscall=%d stop=%#x event LWP=%d original=%d "
-               "RIP=%#lx expected=%#lx\n",
-               sysno, status, (int)event.pl_lwpid, (int)tid,
-               (unsigned long)sysc_reg.r_rip,
-               (unsigned long)((uint64_t)syscall_ip + 2));
+    LOG_EPRINTF("syscall=%d stop=%#x event LWP=%d original=%d "
+                "RIP=%#lx expected=%#lx\n",
+                sysno, status, event_lwpid, (int)tid,
+                (unsigned long)sysc_reg.r_rip,
+                (unsigned long)((uint64_t)syscall_ip + 2));
 
     if(sig != SIGSTOP || (uint64_t)sysc_reg.r_rip != (uint64_t)syscall_ip) {
       errno = EPROTO;
@@ -804,12 +1175,12 @@ pt_syscall(pid_t pid, int sysno, ...) {
       const uint64_t user_flags = 0x254dd5;
       struct reg merged = bak_reg;
 
-      LOG_PRINTF("[Ptrace] Restore refused (errno=%d): saved rflags=%#lx "
-                 "cs=%#lx ss=%#lx, now rflags=%#lx cs=%#lx ss=%#lx\n",
-                 restore_error, (unsigned long)bak_reg.r_rflags,
-                 (unsigned long)bak_reg.r_cs, (unsigned long)bak_reg.r_ss,
-                 (unsigned long)now.r_rflags, (unsigned long)now.r_cs,
-                 (unsigned long)now.r_ss);
+      LOG_EPRINTF("Restore refused (errno=%d): saved rflags=%#lx "
+                  "cs=%#lx ss=%#lx, now rflags=%#lx cs=%#lx ss=%#lx\n",
+                  restore_error, (unsigned long)bak_reg.r_rflags,
+                  (unsigned long)bak_reg.r_cs, (unsigned long)bak_reg.r_ss,
+                  (unsigned long)now.r_rflags, (unsigned long)now.r_cs,
+                  (unsigned long)now.r_ss);
 
       merged.r_rflags
           = (bak_reg.r_rflags & user_flags) | (now.r_rflags & ~user_flags);
@@ -817,8 +1188,8 @@ pt_syscall(pid_t pid, int sysno, ...) {
       merged.r_ss = now.r_ss;
       restored = !pt_setregs(tid, &merged);
 
-      LOG_PRINTF("[Ptrace] Restore with the thread's own protected bits %s\n",
-                 restored ? "succeeded" : "was refused as well");
+      LOG_EPRINTF("Restore with the thread's own protected bits %s\n",
+                  restored ? "succeeded" : "was refused as well");
     }
     if(!restored) {
       errno = restore_error;
@@ -864,9 +1235,6 @@ pt_call_on(pid_t pid, intptr_t function, intptr_t scratch, size_t scratch_size,
     LOG_PERROR("call: save LWP registers");
     return -1;
   }
-
-  LOG_PRINTF("[Ptrace] Remote call LWP=%d function=%#lx saved RIP=%#lx\n",
-             (int)tid, (unsigned long)function, (unsigned long)saved.r_rip);
 
   call = saved;
 
@@ -917,9 +1285,6 @@ pt_call_on(pid_t pid, intptr_t function, intptr_t scratch, size_t scratch_size,
       break;
     }
 
-    LOG_PRINTF("[Ptrace] Remote stop=%#x LWP=%d expected=%d\n", status,
-               (int)event.pl_lwpid, (int)tid);
-
     if(pt_getregs(tid, &call)) {
       break;
     }
@@ -939,16 +1304,16 @@ pt_call_on(pid_t pid, intptr_t function, intptr_t scratch, size_t scratch_size,
       continue;
     }
 
-    LOG_PRINTF("[Ptrace] Call did not return: pid=%d signal=%d RIP=%#lx "
-               "RSP=%#lx return=%#lx\n",
-               pid, WSTOPSIG(status), (unsigned long)call.r_rip,
-               (unsigned long)call.r_rsp, (unsigned long)(scratch + 1));
+    LOG_EPRINTF("Call did not return: pid=%d signal=%d RIP=%#lx "
+                "RSP=%#lx return=%#lx\n",
+                pid, WSTOPSIG(status), (unsigned long)call.r_rip,
+                (unsigned long)call.r_rsp, (unsigned long)(scratch + 1));
     break;
   }
 
   if(!stopped) {
-    LOG_PUTS("[Ptrace] Remote call incomplete; requesting stop before LWP "
-             "restoration");
+    LOG_EPUTS("Remote call incomplete; requesting stop before LWP "
+              "restoration");
     kill(pid, SIGSTOP);
 
     for(int i = 0; i < 200; ++i) {
@@ -973,9 +1338,6 @@ pt_call_on(pid_t pid, intptr_t function, intptr_t scratch, size_t scratch_size,
   }
 
 restore:
-  LOG_PRINTF("[Ptrace] Restoring original LWP=%d; completed=%d\n", (int)tid,
-             !failed);
-
   if(sys_ptrace(PT_SETFPREGS, tid, (caddr_t)&fp, 0)) {
     LOG_PERROR("call: restore FP registers");
     failed = 1;
@@ -1243,8 +1605,8 @@ pt_call(pid_t pid, intptr_t function, const uint64_t args[6],
   stopped = pt_wait_stopped(pid, 10000);
 
   if(!stopped) {
-    LOG_PUTS("[Ptrace] Remote call incomplete; requesting stop before "
-             "restoring the registers");
+    LOG_EPUTS("Remote call incomplete; requesting stop before "
+              "restoring the registers");
     kill(pid, SIGSTOP);
 
     if(!pt_wait_stopped(pid, 2000)) {

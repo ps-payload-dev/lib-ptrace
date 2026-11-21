@@ -48,16 +48,10 @@ to change the install prefix:
 make PLATFORM=ps5 install DESTDIR=/path/to/stage
 ```
 
-The install includes `ptrace.h`, `libptrace.a`, and `ptrace.pc`. Use the SDK's
-pkg-config to add the required compiler and linker flags:
+The install includes `ptrace.h` and `libptrace.a`. Link with
+`-lptrace -lkernel_sys`.
 
-```make
-CFLAGS += $(shell $(PKG_CONFIG) --cflags ptrace)
-LDLIBS += $(shell $(PKG_CONFIG) --libs ptrace)
-```
-
-To install next to the SDK's own headers and libraries instead, use an empty
-prefix and link with `-lptrace -lkernel_sys`:
+To install next to the SDK's own headers and libraries, use an empty prefix:
 
 ```console
 make PLATFORM=ps5 install PREFIX=

@@ -23,10 +23,9 @@ $(OBJ_DIR)/%.o: source/%.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
 install: $(BUILD_DIR)/$(LIB)
-	install -d $(DESTDIR)$(PREFIX)/include $(DESTDIR)$(PREFIX)/lib/pkgconfig
+	install -d $(DESTDIR)$(PREFIX)/include $(DESTDIR)$(PREFIX)/lib
 	install -m 644 headers/ptrace.h $(DESTDIR)$(PREFIX)/include/ptrace.h
 	install -m 644 $< $(DESTDIR)$(PREFIX)/lib/$(LIB)
-	sed -e 's|@PREFIX@|$(PREFIX)|' -e 's|@VERSION@|$(VERSION)|' $(NAME).pc.in > $(DESTDIR)$(PREFIX)/lib/pkgconfig/$(NAME).pc
 
 clean:
 	rm -rf $(BUILD_DIR)

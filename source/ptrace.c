@@ -29,7 +29,6 @@ along with this program; see the file COPYING. If not, see
 #ifdef __ORBIS__
 #include <ps4/kernel.h>
 #include <pthread.h>
-#include <ps4/mdbg.h>
 #endif
 
 #ifdef __PROSPERO__
@@ -747,16 +746,6 @@ pt_setregs(pid_t pid, const struct reg *r) {
 
 static int
 pt_io(pid_t pid, int op, intptr_t addr, void *buf, size_t len) {
-#ifdef __ORBIS__
-  if(op == PIOD_READ_D) {
-    return mdbg_copyout(pid, addr, buf, len);
-  }
-  if(op == PIOD_WRITE_D) {
-    return mdbg_copyin(pid, buf, addr, len);
-  }
-  errno = EINVAL;
-  return -1;
-#else
   struct ptrace_io_desc iod = {
     .piod_op = op, .piod_offs = (void *)addr, .piod_addr = buf, .piod_len = len
   };
@@ -770,7 +759,6 @@ pt_io(pid_t pid, int op, intptr_t addr, void *buf, size_t len) {
   }
 
   return 0;
-#endif
 }
 
 int

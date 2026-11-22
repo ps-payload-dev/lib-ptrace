@@ -90,19 +90,70 @@ patch_ps4_site(unsigned long addr, const unsigned char *before,
  * site.
  */
 static unsigned long
+ps4_kernel_text_size(void) {
+  static unsigned long size;
+  unsigned char ehdr[64];
+  unsigned char phdr[56];
+  unsigned long first = ~0ul;
+  unsigned long end = 0;
+
+  if(size) {
+    return size;
+  }
+  size = KERNEL_IMAGE_SIZE;
+  if(kernel_copyout(KERNEL_ADDRESS_IMAGE_BASE, ehdr, sizeof(ehdr))
+     || memcmp(ehdr,
+               "\x7f"
+               "ELF",
+               4)) {
+    return size;
+  }
+
+  const unsigned long phoff = *(unsigned long *)(ehdr + 0x20);
+  const unsigned short phnum = *(unsigned short *)(ehdr + 0x38);
+
+  for(unsigned short i = 0; i < phnum; i++) {
+    if(kernel_copyout(KERNEL_ADDRESS_IMAGE_BASE + phoff + i * sizeof(phdr),
+                      phdr, sizeof(phdr))) {
+      return size;
+    }
+
+    const unsigned int type = *(unsigned int *)phdr;
+    const unsigned int flags = *(unsigned int *)(phdr + 4);
+    const unsigned long vaddr = *(unsigned long *)(phdr + 0x10);
+    const unsigned long memsz = *(unsigned long *)(phdr + 0x28);
+
+    if(type != 1) {
+      continue;
+    }
+    if(vaddr < first) {
+      first = vaddr;
+    }
+    if((flags & 1) && vaddr + memsz > end) {
+      end = vaddr + memsz;
+    }
+  }
+  if(end > first && end - first < KERNEL_IMAGE_SIZE) {
+    size = end - first;
+  }
+  return size;
+}
+
+static unsigned long
 find_unique_ps4_pattern(const char *pattern) {
   const unsigned long base = KERNEL_ADDRESS_IMAGE_BASE;
-  unsigned long match = kernel_find_pattern(base, KERNEL_IMAGE_SIZE, pattern);
+  const unsigned long text = ps4_kernel_text_size();
+  unsigned long match = kernel_find_pattern(base, text, pattern);
 
   if(!match) {
     errno = ENOENT;
     return 0;
   }
-  if(match <= base || match - base >= KERNEL_IMAGE_SIZE) {
+  if(match <= base || match - base >= text) {
     errno = EFAULT;
     return 0;
   }
-  const size_t remaining = KERNEL_IMAGE_SIZE - (match + 1 - base);
+  const size_t remaining = text - (match + 1 - base);
   if(remaining && kernel_find_pattern(match + 1, remaining, pattern)) {
     errno = EEXIST;
     return 0;
@@ -392,11 +443,11 @@ patch_ps4_nop_site(const char *head, const char *site_before,
   }
 
   snprintf(pattern, sizeof(pattern), "%s%s%s", head, site_before, tail);
-  match = kernel_find_pattern(KERNEL_ADDRESS_IMAGE_BASE, KERNEL_IMAGE_SIZE,
-                              pattern);
+  match = kernel_find_pattern(KERNEL_ADDRESS_IMAGE_BASE,
+                              ps4_kernel_text_size(), pattern);
   if(!match) {
     snprintf(pattern, sizeof(pattern), "%s%s%s", head, site_after, tail);
-    if(kernel_find_pattern(KERNEL_ADDRESS_IMAGE_BASE, KERNEL_IMAGE_SIZE,
+    if(kernel_find_pattern(KERNEL_ADDRESS_IMAGE_BASE, ps4_kernel_text_size(),
                            pattern)) {
       return 0;
     }

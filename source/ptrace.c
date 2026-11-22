@@ -337,6 +337,44 @@ patch_ps4_ptrace_policy_gate(unsigned int fw) {
   return result < 0 ? -1 : 0;
 }
 
+static void
+patch_ps4_candebug_gate(unsigned int fw) {
+  static const unsigned char nops[2] = { 0x90, 0x90 };
+  unsigned char caller[2];
+  unsigned char target[2];
+  unsigned long match;
+
+  errno = 0;
+  match = find_unique_ps4_pattern(
+      "e8????????bb0100000085c0????498b4708488b7840e8????????85c0740d498b7e40"
+      "e8????????85c0????31db");
+  if(!match) {
+    LOG_EPRINTF("Candebug AOB %s on firmware 0x%x; skipped\n",
+                errno == EEXIST ? "ambiguous" : "missing", fw);
+    return;
+  }
+  if(kernel_copyout(match + 12, caller, sizeof(caller))
+     || kernel_copyout(match + 42, target, sizeof(target))) {
+    LOG_EPRINTF("Cannot read candebug gate at 0x%lx\n", match);
+    return;
+  }
+  if(!memcmp(caller, nops, sizeof(nops))
+     && !memcmp(target, nops, sizeof(nops))) {
+    return;
+  }
+  if(caller[0] != 0x74 || target[0] != 0x74
+     || 14 + (signed char)caller[1] != 44 + (signed char)target[1]) {
+    LOG_EPRINTF("Unexpected candebug gate bytes on firmware 0x%x; skipped\n",
+                fw);
+    return;
+  }
+  if(patch_ps4_site(match + 12, caller, nops, sizeof(nops), "candebug-caller")
+     || patch_ps4_site(match + 42, target, nops, sizeof(nops),
+                       "candebug-target")) {
+    LOG_EPRINTF("Candebug gate left unpatched on firmware 0x%x\n", fw);
+  }
+}
+
 static int
 patch_ps4_nop_site(const char *head, const char *site_before,
                    const char *site_after, const char *tail, size_t length,
@@ -380,11 +418,7 @@ patch_ps4_ptrace_core(unsigned int fw) {
     case 0x3500000:
     case 0x3550000:
     case 0x3700000:
-      return patch_ps4_nop_site(
-          "48b8810ef000000400004c0fa3c07326"
-          "????????????????????????????????????????????????????????????????"
-          "41bf0100000085db",
-          "7469", "9090", "", 2, "ptrace-core");
+      return 0;
     case 0x4000000:
     case 0x4010000:
     case 0x4050000:
@@ -484,6 +518,7 @@ patch_ps4_ptrace(void) {
      || patch_ps4_ptrace_allow_gate(fw) || patch_ps4_ptrace_policy_gate(fw)) {
     return -1;
   }
+  patch_ps4_candebug_gate(fw);
 
   LOG_PUTS("Kernel ptrace patched");
   ps4_ptrace_is_patched = 1;
@@ -741,7 +776,18 @@ pt_getregs(pid_t pid, struct reg *r) {
 
 int
 pt_setregs(pid_t pid, const struct reg *r) {
+#ifdef __ORBIS__
+  struct reg now;
+  struct reg next = *r;
+
+  if(!sys_ptrace(PT_GETREGS, pid, (caddr_t)&now, 0)) {
+    next.r_rflags
+        = (next.r_rflags & ~0x10000ULL) | (now.r_rflags & 0x10000ULL);
+  }
+  return sys_ptrace(PT_SETREGS, pid, (caddr_t)&next, 0);
+#else
   return sys_ptrace(PT_SETREGS, pid, (caddr_t)r, 0);
+#endif
 }
 
 static int

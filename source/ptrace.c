@@ -389,41 +389,90 @@ patch_ps4_ptrace_policy_gate(unsigned int fw) {
 }
 
 static void
-patch_ps4_candebug_gate(unsigned int fw) {
+patch_ps4_candebug_gate_monolithic(unsigned int fw) {
+  static const unsigned char before[3] = { 0x0f, 0x94, 0xc0 };
+  static const unsigned char after[3] = { 0x31, 0xc0, 0x90 };
+  unsigned char current[3];
+  unsigned long match;
+
+  errno = 0;
+  match = find_unique_ps4_pattern(
+      "b81000000041f6442403047515488b4308488b7840e8????????85c00f94c0");
+  if(!match) {
+    LOG_EPRINTF("Candebug monolithic AOB %s on firmware 0x%x; skipped\n",
+                errno == EEXIST ? "ambiguous" : "missing", fw);
+    return;
+  }
+  if(kernel_copyout(match + 28, current, sizeof(current))) {
+    LOG_EPRINTF("Cannot read candebug gate at 0x%lx\n", match);
+    return;
+  }
+  if(!memcmp(current, after, sizeof(after))) {
+    return;
+  }
+  if(memcmp(current, before, sizeof(before))) {
+    LOG_EPRINTF("Unexpected candebug gate bytes on firmware 0x%x; skipped\n",
+                fw);
+    return;
+  }
+  if(patch_ps4_site(match + 28, current, after, sizeof(after), "candebug")) {
+    LOG_EPRINTF("Candebug gate left unpatched on firmware 0x%x\n", fw);
+  }
+}
+
+static int
+patch_ps4_candebug_gate_pair(unsigned long match, unsigned int fw) {
   static const unsigned char nops[2] = { 0x90, 0x90 };
   unsigned char caller[2];
   unsigned char target[2];
+
+  if(kernel_copyout(match + 12, caller, sizeof(caller))
+     || kernel_copyout(match + 42, target, sizeof(target))) {
+    LOG_EPRINTF("Cannot read candebug gate at 0x%lx\n", match);
+    return 0;
+  }
+  if(!memcmp(caller, nops, sizeof(nops))
+     && !memcmp(target, nops, sizeof(nops))) {
+    return 1;
+  }
+  if(caller[0] != 0x74 || target[0] != 0x74
+     || 14 + (signed char)caller[1] != 44 + (signed char)target[1]) {
+    LOG_EPRINTF("Unexpected candebug gate bytes on firmware 0x%x; skipped\n",
+                fw);
+    return 0;
+  }
+  if(patch_ps4_site(match + 12, caller, nops, sizeof(nops), "candebug-caller")
+     || patch_ps4_site(match + 42, target, nops, sizeof(nops),
+                       "candebug-target")) {
+    LOG_EPRINTF("Candebug gate left unpatched on firmware 0x%x\n", fw);
+    return 0;
+  }
+  return 1;
+}
+
+static void
+patch_ps4_candebug_gate(unsigned int fw) {
   unsigned long match;
 
   errno = 0;
   match = find_unique_ps4_pattern(
       "e8????????bb0100000085c0????498b4708488b7840e8????????85c0740d498b7e40"
       "e8????????85c0????31db");
-  if(!match) {
-    LOG_EPRINTF("Candebug AOB %s on firmware 0x%x; skipped\n",
-                errno == EEXIST ? "ambiguous" : "missing", fw);
+  if(match) {
+    patch_ps4_candebug_gate_pair(match, fw);
     return;
   }
-  if(kernel_copyout(match + 12, caller, sizeof(caller))
-     || kernel_copyout(match + 42, target, sizeof(target))) {
-    LOG_EPRINTF("Cannot read candebug gate at 0x%lx\n", match);
+
+  errno = 0;
+  match = find_unique_ps4_pattern(
+      "e8????????85c0bb01000000????498b4708488b7840e8????????85c0740d498b7e40"
+      "e8????????85c0????31db");
+  if(match) {
+    patch_ps4_candebug_gate_pair(match, fw);
     return;
   }
-  if(!memcmp(caller, nops, sizeof(nops))
-     && !memcmp(target, nops, sizeof(nops))) {
-    return;
-  }
-  if(caller[0] != 0x74 || target[0] != 0x74
-     || 14 + (signed char)caller[1] != 44 + (signed char)target[1]) {
-    LOG_EPRINTF("Unexpected candebug gate bytes on firmware 0x%x; skipped\n",
-                fw);
-    return;
-  }
-  if(patch_ps4_site(match + 12, caller, nops, sizeof(nops), "candebug-caller")
-     || patch_ps4_site(match + 42, target, nops, sizeof(nops),
-                       "candebug-target")) {
-    LOG_EPRINTF("Candebug gate left unpatched on firmware 0x%x\n", fw);
-  }
+
+  patch_ps4_candebug_gate_monolithic(fw);
 }
 
 static int
@@ -466,6 +515,34 @@ patch_ps4_nop_site(const char *head, const char *site_before,
 static int
 patch_ps4_ptrace_core(unsigned int fw) {
   switch(fw & 0xffff0000) {
+    case 0x1050000:
+    case 0x1060000:
+    case 0x1070000:
+    case 0x1500000:
+    case 0x1510000:
+    case 0x1520000:
+    case 0x1600000:
+    case 0x1610000:
+    case 0x1620000:
+    case 0x1700000:
+    case 0x1710000:
+    case 0x1720000:
+    case 0x1740000:
+    case 0x1750000:
+    case 0x1760000:
+    case 0x2000000:
+    case 0x2010000:
+    case 0x2020000:
+    case 0x2030000:
+    case 0x2040000:
+    case 0x2500000:
+    case 0x2510000:
+    case 0x2550000:
+    case 0x2570000:
+    case 0x3000000:
+    case 0x3100000:
+    case 0x3110000:
+    case 0x3150000:
     case 0x3500000:
     case 0x3550000:
     case 0x3700000:

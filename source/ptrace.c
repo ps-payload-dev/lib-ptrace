@@ -663,6 +663,7 @@ sys_ptrace(int request, pid_t pid, caddr_t addr, int data) {
 
   pthread_mutex_lock(&sys_ptrace_lock);
 
+  errno = 0;
   if((authid = kernel_get_ucred_authid(mypid))
      && !kernel_set_ucred_authid(mypid, 0x3800000000010003l)) {
     ret = ptrace(request, pid, addr, data);
@@ -703,6 +704,7 @@ sys_ptrace(int request, pid_t pid, caddr_t addr, int data) {
 
   pthread_mutex_lock(&sys_ptrace_lock);
 
+  errno = 0;
   if((authid = kernel_get_ucred_authid(mypid))
      && !kernel_set_ucred_authid(mypid, 0x4800000000010003l)) {
     ret = (int)syscall(SYS_ptrace, request, pid, addr, data);
@@ -745,7 +747,7 @@ pt_wait_stopped(pid_t pid, unsigned timeout_ms) {
     pid_t result = pt_wait(pid, &status, WNOHANG);
 
     if(result == pid) {
-      return WIFSTOPPED(status) ? 1 : -1;
+      return WIFSTOPPED(status) ? WSTOPSIG(status) : -1;
     }
     if(result < 0 && errno != EINTR) {
       return -1;
@@ -844,6 +846,132 @@ pt_continue(pid_t pid, int sig) {
   return 0;
 }
 
+int
+pt_follow_fork(pid_t pid) {
+  if(sys_ptrace(PT_FOLLOW_FORK, pid, NULL, 1) == -1) {
+    return -1;
+  }
+
+#ifdef PT_LWP_EVENTS
+  if(sys_ptrace(PT_LWP_EVENTS, pid, NULL, 1) == -1) {
+    return -1;
+  }
+#endif
+
+  return 0;
+}
+
+int
+pt_follow_exec(pid_t pid) {
+#ifdef PT_LWP_EVENTS
+  if(sys_ptrace(PT_LWP_EVENTS, pid, NULL, 1) == -1) {
+    return -1;
+  }
+#else
+  (void)pid;
+#endif
+
+  return 0;
+}
+
+static int
+pt_await_flag(pid_t pid, int flag, struct ptrace_lwpinfo *lwpinfo,
+              const char *what) {
+  int status;
+  int sig;
+
+  memset(lwpinfo, 0, sizeof(*lwpinfo));
+  while(!(lwpinfo->pl_flags & flag)) {
+    if(waitpid(pid, &status, 0) == -1) {
+      return -1;
+    }
+
+    if(!WIFSTOPPED(status)) {
+      LOG_PRINTF("[Ptrace] pid %d is gone while waiting for %s\n", pid, what);
+      errno = ESRCH;
+      return -1;
+    }
+
+    if(sys_ptrace(PT_LWPINFO, pid, (caddr_t)lwpinfo, sizeof(*lwpinfo))
+       == -1) {
+      return -1;
+    }
+
+    if(!(lwpinfo->pl_flags & flag)) {
+      sig = WSTOPSIG(status);
+      LOG_PRINTF("[Ptrace] pid %d stopped by signal %d (flags 0x%x) while "
+                 "waiting for %s, resuming\n",
+                 pid, sig, lwpinfo->pl_flags, what);
+      if(sig == SIGTRAP || sig == SIGSTOP || sig == SIGCONT) {
+        sig = 0;
+      }
+      if(sys_ptrace(PT_CONTINUE, pid, (caddr_t)1, sig) == -1) {
+        return -1;
+      }
+    }
+  }
+
+  return 0;
+}
+
+pid_t
+pt_await_child(pid_t pid) {
+  struct ptrace_lwpinfo lwpinfo;
+
+  LOG_PRINTF("[Ptrace] waiting for pid %d to fork\n", pid);
+  if(pt_await_flag(pid, PL_FLAG_FORKED, &lwpinfo, "fork")) {
+    return -1;
+  }
+
+  LOG_PRINTF("[Ptrace] pid %d forked pid %d, waiting for it to stop\n", pid,
+             lwpinfo.pl_child_pid);
+  if(waitpid(lwpinfo.pl_child_pid, NULL, 0) == -1) {
+    return -1;
+  }
+
+  return lwpinfo.pl_child_pid;
+}
+
+int
+pt_await_exec(pid_t pid) {
+  struct ptrace_lwpinfo lwpinfo;
+
+  LOG_PRINTF("[Ptrace] waiting for pid %d to exec\n", pid);
+
+  return pt_await_flag(pid, PL_FLAG_EXEC, &lwpinfo, "exec");
+}
+
+intptr_t
+pt_getargv(pid_t pid) {
+  const uint64_t args[6] = { 0 };
+  intptr_t faddr = pt_resolve(pid, "FJmglmTMdr4");
+  intptr_t result = 0;
+
+  if(!faddr || pt_call(pid, faddr, args, &result)) {
+    return 0;
+  }
+
+  return result;
+}
+
+int
+pt_signal(pid_t pid, int signum, intptr_t handler) {
+  const uint64_t args[6] = { signum, handler };
+  intptr_t faddr = pt_resolve(pid, "VADc3MNQ3cM");
+  intptr_t result = 0;
+
+  if(!faddr || pt_call(pid, faddr, args, &result)) {
+    return -1;
+  }
+
+  return (int)result;
+}
+
+void
+pt_perror(pid_t pid, const char *s) {
+  fprintf(stderr, "%s: %s\n", s, strerror(pt_errno(pid)));
+}
+
 static int pt_make_writable(pid_t pid, intptr_t addr);
 
 int
@@ -863,28 +991,37 @@ pt_breakat(pid_t pid, intptr_t brkpoint) {
     return -1;
   }
 
-  if(pt_continue(pid, SIGCONT)) {
-    goto fail;
-  }
+  int sig = SIGCONT;
 
-  stopped = pt_wait_stopped(pid, 30000);
-
-  if(stopped == 0) {
-    LOG_EPUTS("Breakpoint not reached; requesting stop before "
-              "removing it");
-    kill(pid, SIGSTOP);
-
-    if(!pt_wait_stopped(pid, 2000)) {
-      errno = ETIMEDOUT;
-      return -1;
+  for(;;) {
+    if(pt_continue(pid, sig)) {
+      goto fail;
     }
 
-    errno = ETIMEDOUT;
-    goto fail;
-  }
-  if(stopped < 0) {
-    errno = ESRCH;
-    goto fail;
+    stopped = pt_wait_stopped(pid, 30000);
+
+    if(stopped == 0) {
+      LOG_EPUTS("Breakpoint not reached; requesting stop before "
+                "removing it");
+      kill(pid, SIGSTOP);
+
+      if(!pt_wait_stopped(pid, 2000)) {
+        errno = ETIMEDOUT;
+        return -1;
+      }
+
+      errno = ETIMEDOUT;
+      goto fail;
+    }
+    if(stopped < 0) {
+      errno = ESRCH;
+      goto fail;
+    }
+    if(stopped == SIGTRAP) {
+      break;
+    }
+
+    sig = stopped;
   }
 
   return pt_copyin(pid, &original, brkpoint, sizeof(original)) ? -1 : 0;
@@ -1452,7 +1589,9 @@ pt_call_on(pid_t pid, intptr_t function, intptr_t scratch, size_t scratch_size,
     }
 
     if((uint64_t)call.r_rip == (uint64_t)scratch + 1) {
-      *result = call.r_rax;
+      if(result) {
+        *result = call.r_rax;
+      }
       failed = 0;
       break;
     }
@@ -1787,8 +1926,16 @@ pt_call(pid_t pid, intptr_t function, const uint64_t args[6],
     *result = cur.r_rax;
   }
 
-  pt_setregs(pid, &bak);
+  error = 0;
+  if(pt_setregs(pid, &bak)) {
+    error = errno;
+  }
   pt_munmap(pid, tramp, 0x1000);
+
+  if(error) {
+    errno = error;
+    return -1;
+  }
 
   return 0;
 

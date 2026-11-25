@@ -36,6 +36,15 @@ int pt_step(pid_t pid);
 int pt_continue(pid_t pid, int sig);
 int pt_breakat(pid_t pid, intptr_t brkpoint);
 
+int pt_follow_fork(pid_t pid);
+int pt_follow_exec(pid_t pid);
+pid_t pt_await_child(pid_t pid);
+int pt_await_exec(pid_t pid);
+
+intptr_t pt_getargv(pid_t pid);
+int pt_signal(pid_t pid, int signum, intptr_t handler);
+void pt_perror(pid_t pid, const char *s);
+
 int pt_getregs(pid_t pid, struct reg *r);
 int pt_setregs(pid_t pid, const struct reg *r);
 

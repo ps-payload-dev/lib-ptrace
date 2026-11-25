@@ -36,6 +36,8 @@ int pt_step(pid_t pid);
 int pt_continue(pid_t pid, int sig);
 int pt_breakat(pid_t pid, intptr_t brkpoint);
 
+int pt_trace_me(void);
+
 int pt_follow_fork(pid_t pid);
 int pt_follow_exec(pid_t pid);
 pid_t pt_await_child(pid_t pid);

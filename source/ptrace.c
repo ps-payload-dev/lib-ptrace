@@ -847,6 +847,11 @@ pt_continue(pid_t pid, int sig) {
 }
 
 int
+pt_trace_me(void) {
+  return ptrace(PT_TRACE_ME, 0, 0, 0);
+}
+
+int
 pt_follow_fork(pid_t pid) {
   if(sys_ptrace(PT_FOLLOW_FORK, pid, NULL, 1) == -1) {
     return -1;
